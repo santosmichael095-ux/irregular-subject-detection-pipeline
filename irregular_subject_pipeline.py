@@ -1,11 +1,11 @@
 """
-Irregular Subject Detection Pipeline
+Irregular Subject Detection Pipeline (Secure Version)
 
 Description:
 Pipeline that queries an Oracle Data Warehouse to identify PDEs associated
 with subjects that have a history of irregular inspections.
 
-Sensitive data such as credentials are loaded from environment variables.
+Sensitive data is protected using hashing and minimization techniques.
 
 Required environment variables:
 DB_USER
@@ -32,20 +32,18 @@ DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_DSN = os.getenv("DB_DSN")
 
-OUTPUT_PATH = "pde_sujeito_hist_irreg.parquet"
+OUTPUT_PATH = "pde_subject_irregular_history.parquet"
 
 
 # ---------------------------------------------------
 # Utility functions
 # ---------------------------------------------------
 
-def current_time():
-    """Return formatted current timestamp."""
+def get_current_time():
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def get_connection():
-    """Create Oracle database connection."""
     return oracledb.connect(
         user=DB_USER,
         password=DB_PASSWORD,
@@ -54,15 +52,21 @@ def get_connection():
 
 
 # ---------------------------------------------------
-# SQL Query
+# SQL Query (WITH DATA PROTECTION)
 # ---------------------------------------------------
 
 QUERY = """
 WITH
-PDE_HIST_IRREG AS 
+PDE_HISTORY_IRREGULAR AS 
 (
-SELECT mo.ID_PDE, mo.ID_FORNECIMENTO, cs.ID_SUJEITO, cs.CPF_CNPJ
+SELECT 
+    mo.ID_PDE, 
+    mo.ID_FORNECIMENTO,
+    cs.ID_SUJEITO,
+    STANDARD_HASH(cs.CPF_CNPJ, 'SHA256') AS CPF_CNPJ_HASH
+
 FROM ORA_DW.MOV_OS mo
+
 LEFT JOIN ORA_DW.CAD_FORNECIMENTO cf 
     ON cf.ID_FORNECIMENTO = mo.ID_FORNECIMENTO
     AND cf.DT_FIM = TO_DATE('9999-12-31','yyyy-mm-dd')
@@ -72,9 +76,10 @@ LEFT JOIN ORA_DW.CAD_SUJEITO cs
     AND cs.DT_FIM = TO_DATE('9999-12-31','yyyy-mm-dd')
 
 WHERE mo.ST_OS LIKE '%PROCEDENTE%'
+AND cs.CPF_CNPJ IS NOT NULL
 ),
 
-PDE_SUJEITO_HIST_IRREG AS
+PDE_SUBJECT_HISTORY_IRREGULAR AS
 (
 SELECT cp.ID_PDE
 
@@ -90,23 +95,22 @@ LEFT JOIN ORA_DW.CAD_SUJEITO cs
 
 WHERE cp.ID_FORNECIMENTO IS NOT NULL
 
-AND cs.CPF_CNPJ IN
+AND STANDARD_HASH(cs.CPF_CNPJ, 'SHA256') IN
 (
-SELECT DISTINCT CPF_CNPJ
-FROM PDE_HIST_IRREG
-WHERE CPF_CNPJ <> '-1'
+SELECT DISTINCT CPF_CNPJ_HASH
+FROM PDE_HISTORY_IRREGULAR
 )
 ),
 
-PDE_SUJEITO_HIST_IRREG_FINAL AS
+PDE_FINAL AS
 (
-SELECT ID_PDE FROM PDE_HIST_IRREG
+SELECT ID_PDE FROM PDE_HISTORY_IRREGULAR
 UNION
-SELECT ID_PDE FROM PDE_SUJEITO_HIST_IRREG
+SELECT ID_PDE FROM PDE_SUBJECT_HISTORY_IRREGULAR
 )
 
-SELECT DISTINCT ID_PDE, 'IRREGULAR' AS IRREGULAR
-FROM PDE_SUJEITO_HIST_IRREG_FINAL
+SELECT DISTINCT ID_PDE, 'IRREGULAR' AS STATUS
+FROM PDE_FINAL
 """
 
 
@@ -116,37 +120,28 @@ FROM PDE_SUJEITO_HIST_IRREG_FINAL
 
 def run_pipeline():
 
-    print("Pipeline started:", current_time())
+    print("Pipeline started:", get_current_time())
 
     start_time = time.time()
 
-    # Connect to database
     connection = get_connection()
     cursor = connection.cursor()
 
-    # Execute query
     cursor.execute(QUERY)
 
-    # Fetch column names
     columns = [col[0] for col in cursor.description]
-
-    # Fetch data
     data = cursor.fetchall()
 
-    # Create DataFrame
     df = pd.DataFrame(data, columns=columns)
 
     print("Rows before deduplication:", df.shape)
 
-    # Remove duplicates
     df.drop_duplicates(inplace=True)
 
     print("Rows after deduplication:", df.shape)
 
-    # Save output
     df.to_parquet(OUTPUT_PATH)
 
-    # Close connection
     cursor.close()
     connection.close()
 
@@ -154,7 +149,7 @@ def run_pipeline():
 
     print("Output saved to:", OUTPUT_PATH)
     print("Execution time (minutes):", (end_time - start_time) / 60)
-    print("Pipeline finished:", current_time())
+    print("Pipeline finished:", get_current_time())
 
 
 # ---------------------------------------------------
